@@ -1,4 +1,4 @@
-function [imData,sizx,sizy]=sbigread2(varargin);
+function [imData,sizx,sizy]=bigread2(varargin)
 %reads tiff files in Matlab bigger than 4GB, allows reading from sframe to sframe+num2read-1 frames of the tiff - in other words, you can read page 200-300 without rading in from page 1.
 %based on a partial solution posted on Matlab Central (http://www.mathworks.com/matlabcentral/answers/108021-matlab-only-opens-first-frame-of-multi-page-tiff-stack)
 %Darcy Peterka 2014, v1.0
@@ -7,7 +7,10 @@ function [imData,sizx,sizy]=sbigread2(varargin);
 %Eftychios Pnevmatikakis 2016, v1.3 (added hdf5 support)
 %Darcy Peterka 2016, v1.4
 %Darcy Peterka 2016, v1.5
-%Darcy Peterka 2016, v1.6 (bugs to dp2403@columbia.edu)
+%Darcy Peterka 2016, v1.6 
+%Pengcheng Zhou 2017 v1.7 (added .avi and image sequence support (sequence support courtesy Conor Heins))
+%Bugs to dp2403@columbia.edu
+
 %Program checks for bit depth, whether int or float, and byte order.  Assumes uncompressed, non-negative (i.e. unsigned) data.
 %
 % Usage:  my_data=bigread('path_to_data_file, start frame, num to read);
@@ -23,6 +26,11 @@ function [imData,sizx,sizy]=sbigread2(varargin);
 %get image type
 path_to_file=strjoin(varargin(1));
 [~,~,ext] = fileparts(path_to_file);
+if nargin<2
+    sframe = 1;
+else
+    sframe = max(1, round(varargin{2}));
+end
 
 % If a tif file, do the following...
 if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
@@ -321,6 +329,73 @@ elseif strcmpi(ext,'.hdf5') || strcmpi(ext,'.h5');
     end
     num2read = min(num2read,dims(end)-sframe+1);
     imData = h5read(path_to_file,'/mov',[ones(1,length(dims)-1),sframe],[dims(1:end-1),num2read]);
+elseif strcmpi(ext,'.avi')
+    obj = audiovideo.mmreader(path_to_file);
+    
+    frame_rate = obj.FrameRate;
+    total = obj.Duration;
+    numFrames = total*frame_rate;
+    
+    sizx = obj.Width;
+    sizy = obj.Height;
+    
+    if nargin < 3
+        num2read = numFrames-sframe+1;
+    else
+        num2read = min(numFrames-sframe+1, round(varargin{3}));
+    end
+    imData = obj.read([sframe, sframe+num2read-1]);
+    imData = squeeze(imData(:, :, 1, :));
+elseif isempty(ext)
+    % the input is a folder and data are stored as image sequences
+    
+    imgs = dir([path_to_file, filesep,'*.tif']);
+    frames = zeros(1,length(imgs));
+    for file = 1:length(imgs)
+        fnam = imgs(file).name;
+        IDs = regexp(fnam,'\d*','match'); % use a regular expression to find frame index within each file name
+        frames(file) = str2num(IDs{1});
+    end
+    
+    % sort frames in ascending order before reading
+    [~,srt] = sort(frames,'ascend');
+    imgs = imgs(srt);
+    
+    %get image info from first image of sequence
+    first_img= fullfile(path_to_file,imgs(1).name);
+    
+    info = imfinfo(first_img);
+    sizx = info.Height;
+    sizy = info.Width;
+    
+    num_tot_frames=length(imgs);
+    if nargin < 2
+        sframe = 1;
+    end
+    if nargin < 3
+        num2read = num_tot_frames-sframe+1;
+    else
+        num2read = min(num_tot_frames-sframe+1, round(varargin{3}));
+    end
+    
+    if (num2read+sframe<= num_tot_frames+1)
+        lastframe=num2read+sframe-1;
+    else
+        num2read=num_tot_frames-sframe+1;
+        lastframe=num_tot_frames;
+        display('Hmmm...just reading from starting frame until the end');
+    end
+    
+    imData = zeros(sizx,sizx,num2read);
+    
+    sframemsg = ['Reading from frame ',num2str(sframe),' to frame ',num2str(lastframe),' of ',num2str(num_tot_frames), ' total frames'];
+    disp(sframemsg)
+    
+    for t = 1:num2read
+        imData(:,:,t)=imread(fullfile(path_to_file,imgs(t+sframe-1).name));
+    end
+    
+    display('Finished reading images'); 
 else
     error('Unknown file extension. Only .tif and .hdf5 files are currently supported');
 end
