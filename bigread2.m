@@ -9,6 +9,15 @@ function [imData,sizx,sizy]=bigread2(varargin)
 %Darcy Peterka 2016, v1.5
 %Darcy Peterka 2016, v1.6 
 %Pengcheng Zhou 2017 v1.7 (added .avi and image sequence support (sequence support courtesy Conor Heins))
+%Pengcheng Zhou 2017 v1.8  (fixed bug with large multipage images with frame offsets larger than 2^32)
+
+%modified by Pengcheng Zhou, Colubmia University, 2017
+% it supports following data formats:
+% tiff
+% hdf5
+% avi
+
+
 %Bugs to dp2403@columbia.edu
 
 %Program checks for bit depth, whether int or float, and byte order.  Assumes uncompressed, non-negative (i.e. unsigned) data.
@@ -23,29 +32,34 @@ function [imData,sizx,sizy]=bigread2(varargin)
 %
 
 
-%get image type
+
+%get image info
 path_to_file=strjoin(varargin(1));
-[~,~,ext] = fileparts(path_to_file);
+
 if nargin<2
     sframe = 1;
 else
     sframe = max(1, round(varargin{2}));
 end
+[~,~,ext] = fileparts(path_to_file);
 
-% If a tif file, do the following...
-if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
+if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif') || strcmpi(ext,'.BTF');
     info = imfinfo(path_to_file);
     
-    %find the apparent number of images in the stack
-    % not extensively error checked, but seems to work on all imagej generated images so far (9/13/16)
-    if strfind(info(1).ImageDescription,'ImageJ')
+    
+    if isfield(info(1), 'ImageDescription') && ~isempty(strfind(info(1).ImageDescription,'ImageJ'))
         junk1=regexp(info(1).ImageDescription,'images=\d*','match');
+        if isempty(junk1)
+            junk1=regexp(info(1).ImageDescription,'frames=\d*','match');
+        end
         junk2=strjoin(junk1);
-        aa=strread(junk2,'%*s %d','delimiter','=');
+        aa=textscan(junk2,'%*s %d','delimiter','=');
+        aa = aa{1};
+        
         numFrames=aa;
         num_tot_frames=numFrames;
         
-        if nargin<=3
+        if nargin<3
             if nargin<2
                 sframe = 1;
             else
@@ -55,15 +69,17 @@ if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
         end
         if nargin==3
             num2read=cell2mat(varargin(3));
+            sframe = cell2mat(varargin(2));
         end
-        
-        % mild error checking on read start and stops
         if sframe<=0
             sframe=1;
         end
         if num2read<1
             num2read=1;
         end
+        %sframe = 1;
+        %num2read=numFrames-sframe+1;
+        
         if sframe>num_tot_frames
             sframe=num_tot_frames;
             num2read=1;
@@ -77,7 +93,7 @@ if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
             display('Hmmm...just reading from starting frame until the end');
         end
         
-        %image data bit depth and type
+        
         bd=info.BitDepth;
         he=info.ByteOrder;
         bo=strcmp(he,'big-endian');
@@ -94,39 +110,40 @@ if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
             form='uint8';
             for_mult=1;
         end
-        
-        %set up cell to hold image data
+        for_mult = uint64(for_mult); 
         framenum=num2read;
         imData=cell(1,framenum);
         
+        
         % Use low-level File I/O to read the file
         fp = fopen(path_to_file , 'rb');
-        
-        
-        %image x and y dims
-        he_w=info.Width;
+        % The StripOffsets field provides the offset to the first strip. Based on
+        % the INFO for this file, each image consists of 1 strip.
+        he_w = info.Width; 
         sizx=he_w;
-        he_h=info.Height;
+        he_w=uint64(he_w);
+        he_h = info.Height;
         sizy=he_h;
+        he_h=uint64(he_h);
         
-        % set offset to first image
         first_offset=info.StripOffsets;
-        ofds=zeros(numFrames);
+        first_offset = uint64(first_offset); 
+        ofds=zeros(numFrames, 1, 'like', uint64(0));
         %compute frame offsets
         for i=1:numFrames
-            ofds(i)=first_offset+(i-1)*he_w*he_h*for_mult;
+            ofds(i)=first_offset+uint64(i-1)*he_w*he_h*for_mult;
             %ofds(i)
         end
+        
         
         sframemsg = ['Reading from frame ',num2str(sframe),' to frame ',num2str(num2read+sframe-1),' of ',num2str(num_tot_frames), ' total frames'];
         disp(sframemsg)
         pause(.2)
         %go to start of first strip
         %fseek(fp, ofds(1), 'bof');
-        % mul is set to > 1 for debugging only...do not change unless you want to seg fault :)
+        % mul is set to > 1 for debugging only
         mul=1;
         
-        % uint reads with different byte orders
         if strcmpi(form,'uint16') || strcmpi(form,'uint8')
             if(bo)
                 for cnt = sframe:lastframe
@@ -186,11 +203,13 @@ if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
         numFrames= blah(1);
         num_tot_frames=numFrames;
         
+        
+        %pretty inelegent kludge to handle imagej big tiff outs (need to pass header info manually in code)
         if (nargin <=3)
             
             %should add more error checking for args... very ugly code below.  works
             %for me after midnight though...
-            if nargin<=3
+            if nargin<3
                 if nargin<2
                     sframe = 1;
                 else
@@ -200,7 +219,17 @@ if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
             end
             if nargin==3
                 num2read=cell2mat(varargin(3));
+                sframe = cell2mat(varargin(2));
             end
+            if sframe<=0
+                sframe=1;
+            end
+            if num2read<1
+                num2read=1;
+            end
+            
+            
+            
             if sframe>num_tot_frames
                 sframe=num_tot_frames;
                 num2read=1;
@@ -221,7 +250,7 @@ if strcmpi(ext,'.tiff') || strcmpi(ext,'.tif');
             if (bd==64)
                 form='double';
             elseif(bd==32)
-                form='single'
+                form='single';
             elseif (bd==16)
                 form='uint16';
             elseif (bd==8)
@@ -326,9 +355,14 @@ elseif strcmpi(ext,'.hdf5') || strcmpi(ext,'.h5');
     end
     if nargin < 3
         num2read = dims(end)-sframe+1;
+    else
+        num2read = round(varargin{3});
     end
     num2read = min(num2read,dims(end)-sframe+1);
-    imData = h5read(path_to_file,'/mov',[ones(1,length(dims)-1),sframe],[dims(1:end-1),num2read]);
+    sframemsg = ['Reading from frame ',num2str(sframe),' to frame ',num2str(num2read+sframe-1),' of ',num2str(dims(end)), ' total frames'];
+    
+    imData =squeeze( h5read(path_to_file,info.GroupHierarchy.Datasets.Name,[ones(1,length(dims)-1),sframe],[dims(1:end-1),num2read]));
+    display('Finished reading images')
 elseif strcmpi(ext,'.avi')
     obj = audiovideo.mmreader(path_to_file);
     
@@ -346,6 +380,29 @@ elseif strcmpi(ext,'.avi')
     end
     imData = obj.read([sframe, sframe+num2read-1]);
     imData = squeeze(imData(:, :, 1, :));
+elseif strcmpi(ext, '.mat')
+    data = matfile(path_to_file);
+    data_info = whos(data);
+    
+    if length(data_info)>1
+        dims = data.Ysiz;
+    else
+        dims = data_info.size;
+    end
+    sizy = dims(1);
+    sizx = dims(2);
+    numFrames = dims(3);
+    if nargin < 3
+        num2read = numFrames-sframe+1;
+    else
+        num2read = min(numFrames-sframe+1, round(varargin{3}));
+    end
+    
+    if length(data_info)>1
+        imData = data.Y(:, :, sframe+(0:(num2read-1)));
+    else
+        imData = eval(sprintf('data.%s(:, :, sframe+(0:(num2read-1)))', data_info.name));
+    end
 elseif isempty(ext)
     % the input is a folder and data are stored as image sequences
     
@@ -395,7 +452,7 @@ elseif isempty(ext)
         imData(:,:,t)=imread(fullfile(path_to_file,imgs(t+sframe-1).name));
     end
     
-    display('Finished reading images'); 
+    display('Finished reading images')
 else
-    error('Unknown file extension. Only .tif and .hdf5 files are currently supported');
+    error('Unknown file extension. Only .tiff and .hdf5 files are currently supported');
 end
